@@ -1,5 +1,5 @@
 // sw.js — VR Explorer Pro (atomic precache & auto-discover assets)
-const VERSION = 'vr-explorer-pro-atomic-2025-10-24b';
+const VERSION = 'vr-explorer-pro-atomic-2025-11-24-v2.5';
 const PRECACHE = `precache-${VERSION}`;
 const TEMP = `temp-${VERSION}`;
 const RUNTIME = `runtime-${VERSION}`;
@@ -98,7 +98,6 @@ self.addEventListener('install', (event) => {
   })());
 });
 
-// ✅ Clean activation + cache purge for old versions
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
