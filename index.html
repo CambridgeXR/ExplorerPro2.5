@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f19" />
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png?v=14">
+  <title>VR Explorer Pro</title>
+  <link rel="manifest" href="./manifest.json?v=14" />
+  <style>
+    :root { --bg:#0b0f19; --fg:#e5e7eb; --muted:#9aa3b2; }
+    html,body {
+      height:100%; margin:0; background:var(--bg); color:var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+      overscroll-behavior: none;
+    }
+    #app { position:fixed; inset:0; overflow:hidden; z-index:0; }
+    canvas { display:block; width:100%; height:100%; }
+    .ui { position:fixed; inset:0; display:grid; place-items:center; z-index:10; pointer-events:auto; }
+    .ui-inner { display:flex; flex-direction:column; gap:.8rem; align-items:center; }
+    h1.appTitle {
+      margin:0 0 .35rem; font-size:1.5rem; font-weight:700; letter-spacing:.2px; font-style: italic;
+    }
+    button {
+      appearance:none; border:0; padding:1rem 1.2rem; border-radius:1rem;
+      background:#121a2b; color:var(--fg); font-weight:600; letter-spacing:.2px;
+      box-shadow:0 6px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+      width:220px; cursor:pointer;
+    }
+    button:active { transform: translateY(1px); }
+    .title { font-style: italic; color: var(--muted); font-size:.9rem; margin-top:.25rem; }
+    .hidden { opacity:0; transform: translateY(8px); pointer-events:none; }
+    .visible { opacity:1; transform: translateY(0); }
+    .fade { transition: opacity .25s ease, transform .25s ease; }
+    #file { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div class="ui">
+    <div id="ui" class="ui-inner fade visible">
+      <h1 class="appTitle">VR Explorer Pro</h1>
+      <button id="selectBtn" type="button">Select simulation</button>
+      <button id="vrBtn" type="button" disabled>Enter VR</button>
+      <button id="installBtn" type="button" style="display:none;">Install App</button>
+      <div class="title">Brought to you by Cambridge VR</div>
+    </div>
+  </div>
+
+  <input id="file" type="file" accept="video/*" />
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/examples/js/controls/DeviceOrientationControls.js"></script>
+
+  <script>
+  (function(){
+    const app = document.getElementById('app');
+
+    let wakeLock = null;
+    async function requestWakeLock(){ try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
+    document.addEventListener('visibilitychange', async () => {
+      if (wakeLock !== null && document.visibilityState === 'visible') { try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
+    });
+    async function goFullscreen(){
+      const el = document.documentElement;
+      try { if (el.requestFullscreen) await el.requestFullscreen(); else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen(); } catch(e){}
+    }
+
+    const video = document.createElement('video');
+    video.setAttribute('playsinline',''); video.loop = true; video.preload = 'metadata'; video.crossOrigin = 'anonymous';
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0,0,0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    app.appendChild(renderer.domElement);
+
+    let sphere, material, texture;
+    function buildSphere(){
+      const geometry = new THREE.SphereGeometry(500, 64, 64);
+      geometry.scale(-1,1,1);
+      texture = new THREE.VideoTexture(video);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      material = new THREE.MeshBasicMaterial({ map: texture });
+      sphere = new THREE.Mesh(geometry, material);
+      scene.add(sphere);
+    }
+    buildSphere();
+
+    let controls = null;
+    try {
+      if (THREE.DeviceOrientationControls) {
+        controls = new THREE.DeviceOrientationControls(camera,true);
+        controls.connect();
+      }
+    } catch(e){ console.warn('DeviceOrientationControls unavailable'); }
+
+    let yawOffset = 0;
+    let mode = 'mono';
+
+    // ===== VERY SMOOTH XR SMOOTHING =====
+    let lastXrTime = null;
+    let smoothedXrYaw = 0;
+    let smoothedAngularVel = 0;
+
+    // Long time constant for super-smooth (more lag)
+    const VELOCITY_FILTER_TAU = 0.25;  // seconds (bigger = smoother)
+    const ANGULAR_RESPONSE = 3.0;      // controls how slowly yaw follows input
+
+    function _normalizeAngleRad(a){ return Math.atan2(Math.sin(a), Math.cos(a)); }
+
+    const xrLoop = (time, frame) => {
+      let dt = 0.016;
+      if (lastXrTime !== null) dt = Math.max(0.001, (time - lastXrTime) / 1000);
+      lastXrTime = time;
+
+      const xrCam = renderer.xr.getCamera();
+      const e = new THREE.Euler().setFromQuaternion(xrCam.quaternion, 'YXZ');
+      const targetYaw = _normalizeAngleRad(e.y);
+      const yawDiff = _normalizeAngleRad(targetYaw - smoothedXrYaw);
+      const rawVel = yawDiff / Math.max(1e-6, dt);
+
+      // filter angular velocity
+      const alphaVel = 1 - Math.exp(-dt / VELOCITY_FILTER_TAU);
+      smoothedAngularVel += (rawVel - smoothedAngularVel) * alphaVel;
+
+      // integrate smoothed velocity with low gain (more smoothing)
+      smoothedXrYaw += smoothedAngularVel * dt / ANGULAR_RESPONSE;
+      smoothedXrYaw = _normalizeAngleRad(smoothedXrYaw);
+
+      sphere.rotation.y = -smoothedXrYaw;
+      renderer.render(scene, xrCam);
+    };
+    // ===== END VERY SMOOTH XR SMOOTHING =====
+
+    function renderMono(){
+      if(controls) controls.update();
+      renderer.setScissorTest(false);
+      renderer.render(scene, camera);
+    }
+
+    function animate(){
+      if(mode==='webxr') return;
+      requestAnimationFrame(animate);
+      renderMono();
+    }
+    animate();
+
+    function onResize(){
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth,window.innerHeight);
+    }
+    window.addEventListener('resize', onResize);
+
+    // --- UI logic unchanged ---
+    const ui = document.getElementById('ui');
+    let uiTimer = null;
+    function showUI(){ ui.classList.remove('hidden'); ui.classList.add('visible'); clearTimeout(uiTimer); uiTimer=setTimeout(hideUI,2500);}
+    function hideUI(){ ui.classList.remove('visible'); ui.classList.add('hidden'); }
+    document.addEventListener('pointerdown', e=>{ if(!e.target.closest('#ui')) showUI(); }, {capture:true});
+    uiTimer=setTimeout(hideUI,3000);
+
+    const selectBtn=document.getElementById('selectBtn');
+    const vrBtn=document.getElementById('vrBtn');
+    const installBtn=document.getElementById('installBtn');
+    const fileInput=document.getElementById('file');
+
+    selectBtn.addEventListener('click',()=>{ fileInput.value=''; if(fileInput.showPicker){try{fileInput.showPicker();return;}catch{}} fileInput.click(); });
+    fileInput.addEventListener('change',e=>{
+      const f=e.target.files[0]; if(!f)return;
+      video.src=URL.createObjectURL(f);
+      video.muted=true;
+      video.play().then(()=>vrBtn.disabled=false).catch(()=>{});
+    });
+
+    async function enterWebXR(){
+      try{
+        const ok = await (navigator.xr && navigator.xr.isSessionSupported('immersive-vr'));
+        if(!ok) return false;
+        const session = await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});
+        renderer.xr.setReferenceSpaceType('local');
+        renderer.setAnimationLoop(xrLoop);
+        await renderer.xr.setSession(session);
+        lastXrTime=null; smoothedXrYaw=0; smoothedAngularVel=0;
+        mode='webxr'; return true;
+      }catch{return false;}
+    }
+    async function enterVR(){
+      const ok = await enterWebXR();
+      if(!ok){ await goFullscreen(); mode='stereo'; }
+    }
+    vrBtn.addEventListener('click', enterVR);
+
+    if('serviceWorker' in navigator){
+      window.addEventListener('load', async ()=>{
+        try{
+          const reg = await navigator.serviceWorker.register('./sw.js?v=14',{scope:'./'});
+          if(reg.waiting) reg.waiting.postMessage('SKIP_WAITING');
+        }catch(e){}
+      });
+    }
+  })();
+  </script>
+</body>
+</html>
+
+
