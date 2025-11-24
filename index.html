@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#0b0f19" />
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="apple-touch-icon" href="./icons/icon-192.png?v=14">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
   <title>VR Explorer Pro</title>
-  <link rel="manifest" href="./manifest.json?v=14" />
+  <link rel="manifest" href="./manifest.json" />
   <style>
     :root { --bg:#0b0f19; --fg:#e5e7eb; --muted:#9aa3b2; }
     html,body {
@@ -17,7 +17,7 @@
       overscroll-behavior: none;
     }
     #app { position:fixed; inset:0; overflow:hidden; z-index:0; }
-    canvas { display:block; width:100%; height:100%; }
+    canvas { display:block; width:100%; height:100%; background:#000; }
     .ui { position:fixed; inset:0; display:grid; place-items:center; z-index:10; pointer-events:auto; }
     .ui-inner { display:flex; flex-direction:column; gap:.8rem; align-items:center; }
     h1.appTitle {
@@ -47,6 +47,7 @@
       <button id="vrBtn" type="button" disabled>Enter VR</button>
       <button id="installBtn" type="button" style="display:none;">Install App</button>
       <div class="title">Brought to you by Cambridge VR</div>
+      <div class="title" style="font-size:0.75rem; opacity:0.7; margin-top:-0.2rem;">v2.5</div>
     </div>
   </div>
 
@@ -59,18 +60,28 @@
   (function(){
     const app = document.getElementById('app');
 
+    // ==== Wake lock + fullscreen ====
     let wakeLock = null;
     async function requestWakeLock(){ try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
     document.addEventListener('visibilitychange', async () => {
-      if (wakeLock !== null && document.visibilityState === 'visible') { try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
+      if (wakeLock !== null && document.visibilityState === 'visible') {
+        try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+      }
     });
     async function goFullscreen(){
       const el = document.documentElement;
-      try { if (el.requestFullscreen) await el.requestFullscreen(); else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen(); } catch(e){}
+      try {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+      } catch(e){}
     }
 
+    // ==== Video / scene setup ====
     const video = document.createElement('video');
-    video.setAttribute('playsinline',''); video.loop = true; video.preload = 'metadata'; video.crossOrigin = 'anonymous';
+    video.setAttribute('playsinline','');
+    video.loop = true;     // ensure looping by default
+    video.preload = 'metadata';
+    video.crossOrigin = 'anonymous';
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -80,6 +91,7 @@
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
+    renderer.setClearColor(0x000000, 1); // black background
     app.appendChild(renderer.domElement);
 
     let sphere, material, texture;
@@ -102,17 +114,14 @@
       }
     } catch(e){ console.warn('DeviceOrientationControls unavailable'); }
 
-    let yawOffset = 0;
     let mode = 'mono';
 
-    // ===== VERY SMOOTH XR SMOOTHING =====
+    // ===== VERY SMOOTH XR SMOOTHING (no rebound, slow & smooth) =====
     let lastXrTime = null;
     let smoothedXrYaw = 0;
-    let smoothedAngularVel = 0;
 
-    // Long time constant for super-smooth (more lag)
-    const VELOCITY_FILTER_TAU = 0.25;  // seconds (bigger = smoother)
-    const ANGULAR_RESPONSE = 3.0;      // controls how slowly yaw follows input
+    // Time constant for low-pass filter (bigger = slower, smoother)
+    const YAW_SMOOTH_TAU = 0.35; // seconds
 
     function _normalizeAngleRad(a){ return Math.atan2(Math.sin(a), Math.cos(a)); }
 
@@ -124,26 +133,21 @@
       const xrCam = renderer.xr.getCamera();
       const e = new THREE.Euler().setFromQuaternion(xrCam.quaternion, 'YXZ');
       const targetYaw = _normalizeAngleRad(e.y);
-      const yawDiff = _normalizeAngleRad(targetYaw - smoothedXrYaw);
-      const rawVel = yawDiff / Math.max(1e-6, dt);
 
-      // filter angular velocity
-      const alphaVel = 1 - Math.exp(-dt / VELOCITY_FILTER_TAU);
-      smoothedAngularVel += (rawVel - smoothedAngularVel) * alphaVel;
-
-      // integrate smoothed velocity with low gain (more smoothing)
-      smoothedXrYaw += smoothedAngularVel * dt / ANGULAR_RESPONSE;
-      smoothedXrYaw = _normalizeAngleRad(smoothedXrYaw);
+      // First-order exponential smoothing on yaw (no velocity integration → no rebound)
+      const alpha = 1 - Math.exp(-dt / YAW_SMOOTH_TAU); // 0..1
+      smoothedXrYaw = _normalizeAngleRad(smoothedXrYaw + (targetYaw - smoothedXrYaw) * alpha);
 
       sphere.rotation.y = -smoothedXrYaw;
       renderer.render(scene, xrCam);
     };
     // ===== END VERY SMOOTH XR SMOOTHING =====
 
+    // Mono render: keep background black, no preview
     function renderMono(){
-      if(controls) controls.update();
       renderer.setScissorTest(false);
-      renderer.render(scene, camera);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear(true, true, true);
     }
 
     function animate(){
@@ -160,25 +164,278 @@
     }
     window.addEventListener('resize', onResize);
 
-    // --- UI logic unchanged ---
+    // --- UI logic: always visible ---
     const ui = document.getElementById('ui');
-    let uiTimer = null;
-    function showUI(){ ui.classList.remove('hidden'); ui.classList.add('visible'); clearTimeout(uiTimer); uiTimer=setTimeout(hideUI,2500);}
-    function hideUI(){ ui.classList.remove('visible'); ui.classList.add('hidden'); }
-    document.addEventListener('pointerdown', e=>{ if(!e.target.closest('#ui')) showUI(); }, {capture:true});
-    uiTimer=setTimeout(hideUI,3000);
+    ui.classList.add('visible');
+    ui.classList.remove('hidden');
 
-    const selectBtn=document.getElementById('selectBtn');
-    const vrBtn=document.getElementById('vrBtn');
-    const installBtn=document.getElementById('installBtn');
-    const fileInput=document.getElementById('file');
+    const selectBtn = document.getElementById('selectBtn');
+    const vrBtn = document.getElementById('vrBtn');
+    const installBtn = document.getElementById('installBtn');
+    const fileInput = document.getElementById('file');
 
-    selectBtn.addEventListener('click',()=>{ fileInput.value=''; if(fileInput.showPicker){try{fileInput.showPicker();return;}catch{}} fileInput.click(); });
-    fileInput.addEventListener('change',e=>{
-      const f=e.target.files[0]; if(!f)return;
-      video.src=URL.createObjectURL(f);
-      video.muted=true;
-      video.play().then(()=>vrBtn.disabled=false).catch(()=>{});
+    // === FALLBACK: original <input type="file"> (with audio) ===
+    function useFileInputFallback(){
+      fileInput.value = '';
+      if(fileInput.showPicker){
+        try{
+          fileInput.showPicker();
+          return;
+        }catch(e){}
+      }
+      fileInput.click();
+    }
+
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files[0]; if(!f) return;
+      video.src = URL.createObjectURL(f);
+      video.loop = true;
+      video.muted = false; // play with audio
+      video.play().then(()=> vrBtn.disabled = false).catch(()=>{});
+    });
+
+    // === Simple IndexedDB storage for directory handle ===
+    function openDb(){
+      return new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) {
+          resolve(null);
+          return;
+        }
+        const req = indexedDB.open('vr-explorer-pro', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('handles')) {
+            db.createObjectStore('handles');
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function saveDirHandle(handle){
+      try{
+        const db = await openDb();
+        if(!db) return;
+        await new Promise((resolve,reject)=>{
+          const tx = db.transaction('handles','readwrite');
+          tx.objectStore('handles').put(handle, 'downloadsDir');
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      }catch(e){
+        console.warn('Could not save directory handle', e);
+      }
+    }
+
+    async function loadDirHandle(){
+      try{
+        const db = await openDb();
+        if(!db) return null;
+        return await new Promise((resolve,reject)=>{
+          const tx = db.transaction('handles','readonly');
+          const store = tx.objectStore('handles');
+          const req = store.get('downloadsDir');
+          req.onsuccess = () => { resolve(req.result || null); };
+          req.onerror = () => { reject(req.error); };
+          tx.oncomplete = () => db.close();
+        });
+      }catch(e){
+        console.warn('Could not load directory handle', e);
+        return null;
+      }
+    }
+
+    // === Full-screen overlay "window" for curated list ===
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(11,15,25,0.98)';
+    overlay.style.display = 'none';
+    overlay.style.zIndex = '20';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
+
+    const overlayInner = document.createElement('div');
+    overlayInner.style.display = 'flex';
+    overlayInner.style.flexDirection = 'column';
+    overlayInner.style.alignItems = 'center';
+    overlayInner.style.gap = '0.75rem';
+    overlayInner.style.padding = '1.2rem';
+    overlayInner.style.borderRadius = '1.25rem';
+    overlayInner.style.background = '#111827';
+    overlayInner.style.boxShadow = '0 18px 45px rgba(0,0,0,0.6)';
+    overlay.appendChild(overlayInner);
+
+    const overlayTitle = document.createElement('div');
+    overlayTitle.textContent = 'Select a simulation';
+    overlayTitle.style.fontWeight = '600';
+    overlayTitle.style.marginBottom = '0.25rem';
+    overlayInner.appendChild(overlayTitle);
+
+    const fileListContainer = document.createElement('div');
+    fileListContainer.id = 'fileList';
+    fileListContainer.style.maxHeight = '260px';
+    fileListContainer.style.overflowY = 'auto';
+    fileListContainer.style.fontSize = '.9rem';
+    fileListContainer.style.width = '260px';
+    fileListContainer.style.textAlign = 'left';
+    fileListContainer.style.borderRadius = '0.75rem';
+    fileListContainer.style.padding = '0.4rem 0.6rem';
+    fileListContainer.style.background = '#020617';
+    overlayInner.appendChild(fileListContainer);
+
+    const overlayButtons = document.createElement('div');
+    overlayButtons.style.display = 'flex';
+    overlayButtons.style.justifyContent = 'space-between';
+    overlayButtons.style.gap = '0.75rem';
+    overlayButtons.style.marginTop = '0.5rem';
+    overlayInner.appendChild(overlayButtons);
+
+    const closeOverlayBtn = document.createElement('button');
+    closeOverlayBtn.type = 'button';
+    closeOverlayBtn.textContent = 'Back';
+    closeOverlayBtn.style.width = '120px';
+    overlayButtons.appendChild(closeOverlayBtn);
+
+    document.body.appendChild(overlay);
+
+    closeOverlayBtn.addEventListener('click', () => {
+      overlay.style.display = 'none';
+    });
+
+    // === Directory + listing logic ===
+    let dirHandle = null;
+    let videoFiles = [];
+
+    async function ensureDirectoryHandle(){
+      // Try to reuse a stored handle first
+      if (!dirHandle) {
+        dirHandle = await loadDirHandle();
+      }
+
+      // Check permission if possible
+      if (dirHandle && dirHandle.queryPermission) {
+        try{
+          let perm = await dirHandle.queryPermission({ mode: 'read' });
+          if (perm === 'prompt') {
+            perm = await dirHandle.requestPermission({ mode: 'read' });
+          }
+          if (perm !== 'granted') {
+            dirHandle = null;
+          }
+        }catch(e){
+          dirHandle = null;
+        }
+      }
+
+      // If still none, ask user to pick Downloads (first-time flow)
+      if (!dirHandle) {
+        if (!window.showDirectoryPicker) return null;
+        try{
+          dirHandle = await window.showDirectoryPicker({
+            id: 'vr-explorer-downloads',
+            startIn: 'downloads'
+          });
+          await saveDirHandle(dirHandle);
+        }catch(e){
+          dirHandle = null;
+        }
+      }
+
+      return dirHandle;
+    }
+
+    async function buildFileListFromDir(){
+      const handle = await ensureDirectoryHandle();
+      if (!handle) {
+        // no directory available → fallback to classic file picker
+        useFileInputFallback();
+        return false;
+      }
+
+      const files = [];
+      try{
+        for await (const [name, entry] of handle.entries()){
+          if (entry.kind === 'file' && name.toLowerCase().endsWith('.mp4')) {
+            files.push({ name, handle: entry });
+          }
+        }
+      }catch(e){
+        console.warn('Error reading directory contents', e);
+        useFileInputFallback();
+        return false;
+      }
+
+      files.sort((a,b)=> a.name.localeCompare(b.name, undefined, { numeric:true, sensitivity:'base' }));
+      videoFiles = files;
+      renderFileList();
+      return true;
+    }
+
+    function renderFileList(){
+      fileListContainer.innerHTML = '';
+
+      if (!videoFiles.length) {
+        fileListContainer.textContent = 'No .mp4 files found in this folder.';
+        return;
+      }
+
+      const list = document.createElement('ul');
+      list.style.listStyle = 'none';
+      list.style.padding = '0';
+      list.style.margin = '0';
+
+      videoFiles.forEach((fileObj, index)=>{
+        const li = document.createElement('li');
+        li.style.padding = '.3rem 0';
+        li.style.cursor = 'pointer';
+        li.style.borderBottom = '1px solid rgba(148,163,184,0.25)';
+
+        const displayName = fileObj.name.replace(/\.mp4$/i, '');
+        li.textContent = displayName;
+
+        li.addEventListener('click', () => {
+          selectVideoFromList(index);
+        });
+
+        list.appendChild(li);
+      });
+
+      fileListContainer.appendChild(list);
+    }
+
+    async function selectVideoFromList(index){
+      const fileObj = videoFiles[index];
+      if(!fileObj) return;
+      try{
+        const file = await fileObj.handle.getFile();
+        const url = URL.createObjectURL(file);
+        video.src = url;
+        video.loop = true;
+        video.muted = false; // allow audio
+        await video.play().then(()=>{ vrBtn.disabled = false; }).catch(()=>{});
+      }catch(e){
+        console.error('Failed to load selected video:', e);
+      } finally {
+        // Return to main UI after selecting (black background)
+        overlay.style.display = 'none';
+      }
+    }
+
+    // === Button behaviour ===
+    selectBtn.addEventListener('click', async ()=>{
+      // If browser doesn't support directory picker, just behave like old version
+      if (!window.showDirectoryPicker) {
+        useFileInputFallback();
+        return;
+      }
+
+      const ok = await buildFileListFromDir();
+      if (ok) {
+        // Show curated list "window"
+        overlay.style.display = 'flex';
+      }
     });
 
     async function enterWebXR(){
@@ -189,20 +446,66 @@
         renderer.xr.setReferenceSpaceType('local');
         renderer.setAnimationLoop(xrLoop);
         await renderer.xr.setSession(session);
-        lastXrTime=null; smoothedXrYaw=0; smoothedAngularVel=0;
-        mode='webxr'; return true;
-      }catch{return false;}
+        lastXrTime = null;
+        smoothedXrYaw = 0;
+        mode = 'webxr';
+
+        // When XR session ends, return to black main UI
+        session.addEventListener('end', () => {
+          mode = 'mono';
+          renderer.setAnimationLoop(null);
+          lastXrTime = null;
+          smoothedXrYaw = 0;
+          try { video.pause(); } catch(e){}
+          animate(); // restart mono loop (black background)
+        });
+
+        return true;
+      }catch{
+        return false;
+      }
     }
+
     async function enterVR(){
       const ok = await enterWebXR();
-      if(!ok){ await goFullscreen(); mode='stereo'; }
+      if(!ok){
+        await goFullscreen();
+        mode='stereo';
+      }
     }
     vrBtn.addEventListener('click', enterVR);
 
+    // === PWA install flow (beforeinstallprompt) ===
+    let deferredInstallPrompt = null;
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (installBtn) {
+        installBtn.style.display = 'block';  // show the Install App button
+      }
+    });
+
+    if (installBtn) {
+      installBtn.addEventListener('click', async () => {
+        if (!deferredInstallPrompt) return;
+        const promptEvent = deferredInstallPrompt;
+        deferredInstallPrompt = null;
+        promptEvent.prompt();
+        try {
+          const choice = await promptEvent.userChoice;
+          if (choice.outcome === 'accepted') {
+            installBtn.style.display = 'none';
+          }
+        } catch(e) {}
+      });
+    }
+
+    // === Service worker for offline PWA ===
     if('serviceWorker' in navigator){
       window.addEventListener('load', async ()=>{
         try{
-          const reg = await navigator.serviceWorker.register('./sw.js?v=14',{scope:'./'});
+          const reg = await navigator.serviceWorker.register('./sw.js?v=25',{scope:'./'});
           if(reg.waiting) reg.waiting.postMessage('SKIP_WAITING');
         }catch(e){}
       });
@@ -211,5 +514,3 @@
   </script>
 </body>
 </html>
-
-
